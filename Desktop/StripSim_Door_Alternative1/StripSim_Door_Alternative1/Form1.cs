@@ -48,11 +48,12 @@ namespace StripSim_Door_Alternative1
         private ProgressBar[] multiProgressBars; // ProgressBar references for bouncers 2-5
         private bool multiScreeningActive = false;
         private double clubMood = 0.5;
+        private (String, int)[] usernames;
+        private Queue<int> lastFiveDaysRatings = new Queue<int>(20);
 
-
-        private int dayCounter = 0;
+        private int dayCounter = 1;
         private int followersCount = 5;
-
+        
         public DoorSim1()
         {
             InitializeComponent();
@@ -60,6 +61,7 @@ namespace StripSim_Door_Alternative1
             simulationTimer.Interval = 1000; // 1 second
             simulationTimer.Tick += SimulationTimer_Tick;
             LoadVelvetClubs();
+            LoadUsernames();
 
             numericUpDown2.ValueChanged += numericUpDown2_ValueChanged;
             checkBox1.CheckedChanged += checkBox1_CheckedChanged;
@@ -109,6 +111,38 @@ namespace StripSim_Door_Alternative1
                 comboBox1.SelectedIndex = 0;
 
             velvetClub = velvetClubs.First();
+        }
+
+        private void LoadUsernames()
+        {
+            string xmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "club_user_real_names_300_Spaced.xml");
+            if (!File.Exists(xmlPath))
+            {
+                usernames = new (string, int)[0];
+                MessageBox.Show("Usernames file not found: " + xmlPath, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            try
+            {
+                var doc = XDocument.Load(xmlPath);
+                usernames = doc.Descendants("User")
+                               .Select(x =>
+                               {
+                                   var username = (string)x.Element("Username");
+                                   var clubLevelAttr = x.Element("ClubLevel");
+                                   int clubLevel = 0;
+                                   if (clubLevelAttr != null)
+                                       int.TryParse(clubLevelAttr.Value, out clubLevel);
+                                   return (username, clubLevel);
+                               })
+                               .Where(u => !string.IsNullOrWhiteSpace(u.username))
+                               .ToArray();
+            }
+            catch
+            {
+                usernames = new (string, int)[0];
+            }
         }
 
         private void numericUpDown2_ValueChanged(object sender, EventArgs e)
@@ -530,6 +564,16 @@ namespace StripSim_Door_Alternative1
         {
             if (!isSimulating)
             {
+                endDay(); // Reset stats and labels for the new day
+
+                // If not the very first simulation, increment the day
+                if (simulationTime != default(DateTime) && simulationTime != simulationStart)
+                {
+                    dayCounter++;
+                    buttonRandomPost_Click(sender, e); 
+                }
+
+                // Always start at 21:00 for the current day
                 simulationTime = simulationStart;
                 label1.Text = simulationTime.ToString("HH:mm");
                 simulationTimer.Start();
@@ -539,7 +583,8 @@ namespace StripSim_Door_Alternative1
                 lastCustomerTime = simulationTime;
                 velvetClubRuntimes = new VelvetClubRuntime();
                 clientArrivals = GenerateClientArrivals(expectedClientsFormula());
-                label44.Text = clientArrivals.Sum().ToString(); 
+                label44.Text = clientArrivals.Sum().ToString();
+                label51.Text = dayCounter.ToString(); // Update day label if you have one
             }
         }
 
@@ -560,12 +605,11 @@ namespace StripSim_Door_Alternative1
 
         private void stopSimulation(object sender, EventArgs e)
         {
-            // Stop and reset the simulation
             simulationTimer.Stop();
             label1.Text = simulationTime.ToString("HH:mm");
             isSimulating = false;
-            dayCounter ++;
             buttonRandomPost_Click(sender, e);
+            ShowRandomCommentsOnSocialMediaTab();
         }
 
         private void createCustomer()
@@ -657,7 +701,6 @@ namespace StripSim_Door_Alternative1
             label24.Text = $"Number of Followers : {followersCount}";
             ShowRandomPostAndImage();
             AddFollowers();
-            incrementDay();
         }
 
         private void ShowRandomPostAndImage()
@@ -741,7 +784,7 @@ namespace StripSim_Door_Alternative1
             label24.Text = $"Number of Followers : {followersCount}";
         }
 
-        private void ShowRandomCommentsOnSocialMediaTab(int count = 4)
+        private void ShowRandomCommentsOnSocialMediaTab(int count = 6)
         {
             try
             {
@@ -764,6 +807,7 @@ namespace StripSim_Door_Alternative1
 
                 var rand = new Random();
                 var selectedComments = new List<string>();
+                var selectedStars = new List<int>();
 
                 for (int i = 0; i < count; i++)
                 {
@@ -776,28 +820,103 @@ namespace StripSim_Door_Alternative1
                     if (sourceList.Count == 0)
                     {
                         selectedComments.Add("No comments available.");
+                        selectedStars.Add(0);
                     }
                     else
                     {
                         var comment = sourceList[rand.Next(sourceList.Count)];
                         selectedComments.Add(comment.Element("Text")?.Value ?? "");
-                        // Remove to avoid duplicates
+                        int stars = 0;
+                        int.TryParse(comment.Element("Stars")?.Value, out stars);
+                        selectedStars.Add(stars);
                         sourceList.Remove(comment);
                     }
                 }
 
-                if (selectedComments.Count > 0) textBox2.Text = selectedComments[0];
-                if (selectedComments.Count > 1) textBox3.Text = selectedComments[1];
-                if (selectedComments.Count > 2) textBox4.Text = selectedComments[2];
-                if (selectedComments.Count > 3) textBox5.Text = selectedComments[3];
+                TextBox[] textBoxes = { textBoxReview1, textBoxReview2, textBoxReview3, textBoxReview4, textBoxReview5, textBoxReview6 };
+                PictureBox[] starPictures = { pictureBoxUser1, pictureBoxUser2, pictureBoxUser3, pictureBoxUser4, pictureBoxUser5, pictureBoxUser6 };
+                GroupBox[] groupBoxes = {groupBoxUser1, groupBoxUser2, groupBoxUser3, groupBoxUser4, groupBoxUser5, groupBoxUser6};
+
+                // Dictionary mapping int 1-6 to arrays of 5 PictureBox controls
+                Dictionary<int, PictureBox[]> reviewStarPictureBoxes = new Dictionary<int, PictureBox[]>
+                {
+                { 1, new PictureBox[] { pictureBoxStar11, pictureBoxStar12, pictureBoxStar13, pictureBoxStar14, pictureBoxStar15 } },
+                { 2, new PictureBox[] { pictureBoxStar21, pictureBoxStar22, pictureBoxStar23, pictureBoxStar24, pictureBoxStar25 } },
+                { 3, new PictureBox[] { pictureBoxStar31, pictureBoxStar32, pictureBoxStar33, pictureBoxStar34, pictureBoxStar35 } },
+                { 4, new PictureBox[] { pictureBoxStar41, pictureBoxStar42, pictureBoxStar43, pictureBoxStar44, pictureBoxStar45 } },
+                { 5, new PictureBox[] { pictureBoxStar51, pictureBoxStar52, pictureBoxStar53, pictureBoxStar54, pictureBoxStar55 } },
+                { 6, new PictureBox[] { pictureBoxStar61, pictureBoxStar62, pictureBoxStar63, pictureBoxStar64, pictureBoxStar65 } }
+                };
+
+                for (int i = 1; i <= selectedComments.Count; i++)
+                {
+                    var textBox = textBoxes[i - 1];
+                    if (textBox != null)
+                    {
+                        groupBoxes[i - 1].Text = usernames[rand.Next(usernames.Count())].Item1;
+                        textBox.Text = selectedComments[i - 1];
+                        textBox.Visible = true;
+                        starPictures[i - 1].Visible = true;
+                        starPictures[i - 1].Image = Image.FromFile(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images", "Customer_Reviews_Icons", "Customer1.png"));
+                        for (int j = 0; j < selectedStars[i - 1]; j++)
+                        {
+                            if (reviewStarPictureBoxes.ContainsKey(i) && j < reviewStarPictureBoxes[i].Length)
+                            {
+                                reviewStarPictureBoxes[i][j].Visible = true;
+                            }
+                        }
+                        for (int j = selectedStars[i - 1]; j < 5; j++)
+                        {
+                            if (reviewStarPictureBoxes.ContainsKey(i) && j < reviewStarPictureBoxes[i].Length)
+                            {
+                                reviewStarPictureBoxes[i][j].Visible = false;
+                            }
+                        }
+                    }
+                }
+
+                // FIFO: Add new ratings, remove oldest if over 20
+                foreach (var stars in selectedStars)
+                {
+                    lastFiveDaysRatings.Enqueue(stars);
+                    if (lastFiveDaysRatings.Count > 20)
+                        lastFiveDaysRatings.Dequeue();
+                }
+
+                // Calculate and display average of all ratings
+                if (lastFiveDaysRatings.Count > 0)
+                {
+                    double avg = lastFiveDaysRatings.Average();
+                    switch (Math.Max(1, (int)Math.Round(avg, MidpointRounding.AwayFromZero)))
+                    {
+                        case 1:
+                            AverageRatingLabel.Text = "Overwhelmingly Negative";
+                            break;
+                        case 2:
+                            AverageRatingLabel.Text = "Mostly Negative";
+                            break;
+                        case 3:
+                            AverageRatingLabel.Text = "Mixed or Neutral";
+                            break;
+                        case 4:
+                            AverageRatingLabel.Text = "Mostly Positive";
+                            break;
+                        case 5:
+                            AverageRatingLabel.Text = "Overwhelmingly Positive";
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                else
+                {
+                    AverageRatingLabel.Text = "Last 5 days rating: N/A";
+                }
             }
             catch (Exception ex)
             {
-                textBox1.Text = "Error loading comments: " + ex.Message;
-                if (textBox2 != null) textBox2.Text = "";
-                if (textBox3 != null) textBox3.Text = "";
-                if (textBox4 != null) textBox4.Text = "";
-                if (textBox5 != null) textBox5.Text = "";
+                textBoxReview1.Text = "Error loading comments: " + ex.Message;
+                AverageRatingLabel.Text = "N/A";
             }
         }
 
@@ -810,10 +929,15 @@ namespace StripSim_Door_Alternative1
             // Set image
             string imagePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images", "logos", $"{idx}.jpeg");
             if (File.Exists(imagePath))
+            {
                 pictureBox14.Image = Image.FromFile(imagePath);
+                pictureBoxClubLogo.Image = Image.FromFile(imagePath);
+            }
             else
+            {
                 pictureBox14.Image = null;
-
+                pictureBoxClubLogo.Image = null;
+            }
             // Set attributes in listBox1
             var club = velvetClubs[idx];
             listBox1.Items.Clear();
@@ -959,6 +1083,11 @@ namespace StripSim_Door_Alternative1
             tabControl1.SelectedTab = tabControl1.TabPages[4];
         }
 
+        private void pictureBox18_Click(object sender, EventArgs e)
+        {
+            tabControl1.SelectedTab = tabControl1.TabPages[0];
+        }
+
         private void groupBox1_Enter(object sender, EventArgs e)
         {
 
@@ -972,6 +1101,35 @@ namespace StripSim_Door_Alternative1
         private void label35_Click(object sender, EventArgs e)
         {
 
+        }
+
+        private void endDay()
+        {
+            // Reset internal stats
+            doorRevenue = 0;
+            acceptedClients.Clear();
+            rejectedClients.Clear();
+            
+            clientsList.Clear();
+            clients = 0;
+            velvetClubRuntimes = new VelvetClubRuntime();
+
+            // Reset labels (adjust label names as needed)
+            label21.Text = "0"; // Door revenue
+            label20.Text = "0"; // Accepted clients
+            label15.Text = "0"; // Rejected clients
+            label10.Text = "0"; // Total clients processed
+            label9.Text = "0";  // Current clients
+            label31.Text = "0"; // Show revenue
+            label38.Text = "0"; // Bar revenue
+            label33.Text = "0"; // Lap booth revenue
+            label34.Text = "0"; // VIP room revenue
+            label40.Text = "0"; // Cloakroom revenue
+            label42.Text = "0"; // Entrance revenue
+            label32.Text = "0"; // Total daily revenue
+            label36.Text = "0"; // Number of customers
+
+            // Reset any other relevant UI elements or variables here
         }
     }
 }
