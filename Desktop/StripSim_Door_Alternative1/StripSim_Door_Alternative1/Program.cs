@@ -16,7 +16,7 @@ namespace StripSim_Door_Alternative1
         {
             //Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new DoorSim1());
+            Application.Run(new Menu());
         }
     }
 }

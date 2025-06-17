@@ -37,13 +37,11 @@ namespace StripSim_Door_Alternative1
         private List<Client> rejectedClients = new List<Client>();
         private double doorTolerance = 0.5;
         private int entryPrice = 30;
-        private int doorRevenue = 0;
         private List<VelvetClub> velvetClubs = new List<VelvetClub>();
         private VelvetClub velvetClub = new VelvetClub();
         private VelvetClubRuntime velvetClubRuntimes = new VelvetClubRuntime();
-        private int[] clientArrivals; 
+        private int[] clientArrivals;
         private ClientExitTimeLinkedList clientsLinkedList = new ClientExitTimeLinkedList();
-        // Add these fields to DoorSim1 class (if not already present)
         private int[] multiScreening; // Progress for each bouncer (except the main one)
         private ProgressBar[] multiProgressBars; // ProgressBar references for bouncers 2-5
         private bool multiScreeningActive = false;
@@ -52,8 +50,10 @@ namespace StripSim_Door_Alternative1
         private Queue<int> lastFiveDaysRatings = new Queue<int>(20);
 
         private int dayCounter = 1;
-        private int followersCount = 5;
-        
+        private List<int> selectedReviewIds = new List<int>();
+        private List<Bouncer> bouncerList = new List<Bouncer>();
+        private List<Stripper> stripperList = Stripper.LoadFromXml(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Strippers.xml"));
+
         public DoorSim1()
         {
             InitializeComponent();
@@ -62,17 +62,68 @@ namespace StripSim_Door_Alternative1
             simulationTimer.Tick += SimulationTimer_Tick;
             LoadVelvetClubs();
             LoadUsernames();
+            LoadLanguages(); // Load languages for the LanguageSelector ComboBox
 
             numericUpDown2.ValueChanged += numericUpDown2_ValueChanged;
-            checkBox1.CheckedChanged += checkBox1_CheckedChanged;
             comboBox1.SelectedIndexChanged += comboBox1_SelectedIndexChanged;
+            LanguageSelector.SelectedIndexChanged += languageSelection_SelectedIndexChanged;
+            this.removeStripperButton.Click += this.removeStripperButton_Click;
+            this.addStripperButton.Click += this.addStripperButton_Click;
+            this.trackBarDoorBouncers.Scroll += this.trackBarDoorBouncer_Scroll;
+            this.StripperSelectionBox.SelectedIndexChanged += StripperListBox_SelectedIndexChanged;
 
             lastTickTime = DateTime.Now;
-            setDoorReadiness();
+            setDoorReadiness(0);
             label44.Text = expectedClientsFormula().ToString(); // Initialize expected clients formula
             clientArrivals = GenerateClientArrivals(expectedClientsFormula());
             multiScreening = new int[4]; // For bouncers 2-5 (progressBar5,6,7,8)
             multiProgressBars = new ProgressBar[] { progressBar5, progressBar6, progressBar7, progressBar8 };
+
+            LoadBouncers();
+            LoadContractedDoorBouncers();
+            PopulateStripperListBox();
+        }
+
+        private void LoadBouncers()
+        {
+            bouncerList.Clear();
+            string xmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DoorBouncers.xml");
+            if (!File.Exists(xmlPath))
+                return;
+
+            var doc = XDocument.Load(xmlPath);
+            foreach (var x in doc.Descendants("bouncer"))
+            {
+                bouncerList.Add(new Bouncer
+                {
+                    Name = (string)x.Attribute("name") ?? (string)x.Element("name"),
+                    ConflictControl = (int?)x.Element("conflict_control") ?? 0,
+                    ClientScreening = (int?)x.Element("client_screening") ?? 0,
+                    DailyWage = (int?)x.Element("daily_wage") ?? 0,
+                    Overall = int.TryParse((string)x.Element("overall"), out var overallInt)
+                        ? overallInt
+                        : (float.TryParse((string)x.Element("overall"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var overallFloat)
+                            ? (int)Math.Round(overallFloat)
+                            : 0)
+                });
+            }
+        }
+
+        private void LoadContractedDoorBouncers()
+        {
+            contractedBouncers.Items.Clear();
+            string xmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DoorBouncers.xml");
+            if (!File.Exists(xmlPath))
+                return;
+
+            var doc = XDocument.Load(xmlPath);
+            var bouncerNames = doc.Descendants("bouncer")
+                                  .Select(x => (string)x.Attribute("name"))
+                                  .Where(name => !string.IsNullOrEmpty(name))
+                                  .ToList();
+
+            foreach (var name in bouncerNames)
+                contractedBouncers.Items.Add(name);
         }
 
         private void LoadVelvetClubs()
@@ -145,10 +196,33 @@ namespace StripSim_Door_Alternative1
             }
         }
 
+        private void LoadLanguages()
+        {
+            string xmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "daily_reviews_clean_distributed.xml");
+            if (!File.Exists(xmlPath))
+                return;
+
+            try
+            {
+                var doc = XDocument.Load(xmlPath);
+                var firstReview = doc.Descendants("Review")
+                                     .Select(r => r.Element("text") ?? r.Element("Text"))
+                                     .FirstOrDefault();
+
+                if (firstReview != null)
+                {
+                    var languages = firstReview.Elements().Select(e => e.Name.LocalName).ToList();
+                    LanguageSelector.DataSource = languages;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error loading languages: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         private void numericUpDown2_ValueChanged(object sender, EventArgs e)
         {
-            numericUpDown2.Maximum = velvetClub.DoorBouncerCapacity;
-            setDoorReadiness();
             multiScreening = new int[4];
             for (int i = 0; i < multiProgressBars.Length; i++)
             {
@@ -157,39 +231,8 @@ namespace StripSim_Door_Alternative1
             }
         }
 
-        private void checkBox1_CheckedChanged(object sender, EventArgs e)
+        private void setDoorReadiness(int readinessValue)
         {
-            setDoorReadiness();
-        }
-
-        private void setDoorReadiness()
-        {
-            // Get selected club
-            int idx = comboBox1.SelectedIndex;
-            if (idx < 0 || idx >= velvetClubs.Count)
-            {
-                progressBar1.Value = 1;
-                return;
-            }
-
-            var club = velvetClubs[idx];
-            decimal bouncerCapacity = club.DoorBouncerCapacity;
-            
-            decimal bouncersOnDuty = numericUpDown2.Value;
-            // Avoid division by zero
-            decimal ratio = bouncerCapacity > 0 ? (bouncersOnDuty / bouncerCapacity) : 0;
-            decimal readiness = ratio * 70m;
-
-            if (checkBox1.Checked)
-                readiness += 20m;
-
-            // Add random value (0-10)
-            Random rnd = new Random(Guid.NewGuid().GetHashCode());
-            readiness += rnd.Next(0, 11);
-
-            // Clamp between 1 and 100
-            int readinessValue = (int)Math.Max(1, Math.Min(100, Math.Round(readiness)));
-
             progressBar1.Value = readinessValue;
             progressBar4.Value = readinessValue;
             if (readinessValue < 40)
@@ -291,14 +334,19 @@ namespace StripSim_Door_Alternative1
                 {
                     simulationTimer.Stop();
                     isSimulating = false;
-                    ShowRandomCommentsOnSocialMediaTab();
+                    endDay(); // This will generate new comments for the new day
                 }
                 //Club Mood will be a combination of multiple parameters
-                //-Clients to Capacity ratio (peak at 0.75) linear function
-                //-Strippers to Clients ratio (1/7) is good, it gets slightly better under and exponentially worse over
-                //-Are there enough barmens / cleaners / servers / drinks 
-                //-Hour is important, peaks around 01:00 
-                clubMood = 0.5; 
+                //-Clients to Capacity ratio (peak at 0.75) linear function 5%
+                //-Strippers to Clients ratio (1/7) is good, it gets slightly better under and exponentially worse over 30%
+                //-Are there enough barmens / cleaners / servers / drinks 5%
+                //-Hour is important, peaks around 01:00 5%
+                //Girls Attractiveness 30%
+                //Is there too much queue 10% (Outside bouncers)
+                //Mobs/Drunk/High (problematic clients) inside 5%
+                //DJ 2.5%
+                //Inside safety (Inside bouncers) 2.5%
+                clubMood = 0.5;
                 simulationMinuteAccumulator -= 1.0;
             }
         }
@@ -385,8 +433,6 @@ namespace StripSim_Door_Alternative1
                         clientsLinkedList.Insert(client);
                         client.SetExitTime(simulationTime);
                         label20.Text = acceptedClients.Count.ToString();
-                        doorRevenue += entryPrice;
-                        label21.Text = doorRevenue.ToString();
                         velvetClubRuntimes.NofCustomers += 1;
                         label36.Text = (velvetClubRuntimes.NofCustomers).ToString();
                         double multiplier = 1.0 + (velvetClubRuntimes.level * 0.2);
@@ -398,6 +444,7 @@ namespace StripSim_Door_Alternative1
                         }
                         velvetClubRuntimes.EntranceRevenue += 30 * multiplier;
                         label42.Text = velvetClubRuntimes.EntranceRevenue.ToString();
+                        label21.Text = velvetClubRuntimes.EntranceRevenue.ToString();
                     }
                     else
                     {
@@ -518,8 +565,6 @@ namespace StripSim_Door_Alternative1
                                 clientsLinkedList.Insert(client);
                                 client.SetExitTime(simulationTime);
                                 label20.Text = acceptedClients.Count.ToString();
-                                doorRevenue += entryPrice;
-                                label21.Text = doorRevenue.ToString();
                                 velvetClubRuntimes.NofCustomers += 1;
                                 label36.Text = (velvetClubRuntimes.NofCustomers).ToString();
                                 double multiplier = 1.0 + (velvetClubRuntimes.level * 0.2);
@@ -531,6 +576,7 @@ namespace StripSim_Door_Alternative1
                                 }
                                 velvetClubRuntimes.EntranceRevenue += 30 * multiplier;
                                 label42.Text = velvetClubRuntimes.EntranceRevenue.ToString();
+                                label21.Text = velvetClubRuntimes.EntranceRevenue.ToString();
                             }
                             else
                             {
@@ -564,13 +610,14 @@ namespace StripSim_Door_Alternative1
         {
             if (!isSimulating)
             {
-                endDay(); // Reset stats and labels for the new day
+                if (dayCounter > 1)
+                    endDay(); // Reset stats and labels for the new day
 
                 // If not the very first simulation, increment the day
                 if (simulationTime != default(DateTime) && simulationTime != simulationStart)
                 {
                     dayCounter++;
-                    buttonRandomPost_Click(sender, e); 
+                    buttonRandomPost_Click(sender, e);
                 }
 
                 // Always start at 21:00 for the current day
@@ -581,10 +628,14 @@ namespace StripSim_Door_Alternative1
                 clients = 0;
                 label9.Text = clients.ToString();
                 lastCustomerTime = simulationTime;
-                velvetClubRuntimes = new VelvetClubRuntime();
+                velvetClubRuntimes.newDay();
                 clientArrivals = GenerateClientArrivals(expectedClientsFormula());
                 label44.Text = clientArrivals.Sum().ToString();
                 label51.Text = dayCounter.ToString(); // Update day label if you have one
+
+                selectedReviewIds.Clear();
+                if (dayCounter > 1)
+                    ShowRandomCommentsOnSocialMediaTab(6, true);
             }
         }
 
@@ -609,7 +660,6 @@ namespace StripSim_Door_Alternative1
             label1.Text = simulationTime.ToString("HH:mm");
             isSimulating = false;
             buttonRandomPost_Click(sender, e);
-            ShowRandomCommentsOnSocialMediaTab();
         }
 
         private void createCustomer()
@@ -698,7 +748,7 @@ namespace StripSim_Door_Alternative1
         private void buttonRandomPost_Click(object sender, EventArgs e)
         {
             label25.Text = $"Day Counter : {dayCounter}";
-            label24.Text = $"Number of Followers : {followersCount}";
+            label24.Text = $"Number of Followers : {velvetClubRuntimes.followersCount}";
             ShowRandomPostAndImage();
             AddFollowers();
         }
@@ -740,6 +790,8 @@ namespace StripSim_Door_Alternative1
             dayCounter++;
             label25.Text = $"Day Counter : {dayCounter}";
             AddFollowers();
+            selectedReviewIds.Clear(); // <-- Add this line
+            ShowRandomCommentsOnSocialMediaTab(6, true); // Force new selection for the new day
         }
 
         private void AddFollowers()
@@ -749,9 +801,9 @@ namespace StripSim_Door_Alternative1
             // If scandal, decrease followers by 5%
             if (checkBox3.Checked)
             {
-                int decrease = (int)Math.Floor(followersCount * 0.05);
-                followersCount = Math.Max(0, followersCount - decrease);
-                label24.Text = $"Number of Followers : {followersCount}";
+                int decrease = (int)Math.Floor(velvetClubRuntimes.followersCount * 0.05);
+                velvetClubRuntimes.followersCount = Math.Max(0, velvetClubRuntimes.followersCount - decrease);
+                label24.Text = $"Number of Followers : {velvetClubRuntimes.followersCount}";
                 return;
             }
 
@@ -759,7 +811,7 @@ namespace StripSim_Door_Alternative1
             int newFollowers = rand.Next(5, 11);
 
             // Add 1-3% of current followers
-            int percentFollowers = (int)Math.Floor(followersCount * (rand.Next(1, 4) / 100.0));
+            int percentFollowers = (int)Math.Floor(velvetClubRuntimes.followersCount * (rand.Next(1, 4) / 100.0));
             newFollowers += percentFollowers;
 
             // Trackbar multipliers
@@ -780,72 +832,96 @@ namespace StripSim_Door_Alternative1
             if (checkBox2.Checked)
                 newFollowers *= 2;
 
-            followersCount += newFollowers;
-            label24.Text = $"Number of Followers : {followersCount}";
+            velvetClubRuntimes.followersCount += newFollowers;
+            label24.Text = $"Number of Followers : {velvetClubRuntimes.followersCount}";
         }
 
-        private void ShowRandomCommentsOnSocialMediaTab(int count = 6)
+        private void ShowRandomCommentsOnSocialMediaTab(int count = 6, bool forceNewSelection = false)
         {
             try
             {
-                string xmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "daily_reviews_game_exact600_final.xml");
+                string xmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "daily_reviews_clean_distributed.xml");
                 var doc = XDocument.Load(xmlPath);
-                var posts = doc.Descendants("Review")
-                    .Where(x => x.Element("ClubLevel") != null &&
-                                int.TryParse(x.Element("ClubLevel").Value, out int lvl) &&
-                                lvl == velvetClub.Level &&
-                                x.Element("Stars") != null &&
-                                int.TryParse(x.Element("Stars").Value, out int _))
+
+                string selectedLanguage = LanguageSelector.SelectedItem?.ToString() ?? "en";
+
+                // Get all valid reviews for the current club level and language
+                var allPosts = doc.Descendants("Review")
+                    .Where(x =>
+                        x.Element("ClubLevel") != null &&
+                        int.TryParse(x.Element("ClubLevel").Value, out int lvl) &&
+                        lvl == velvetClub.Level &&
+                        x.Element("Stars") != null &&
+                        int.TryParse(x.Element("Stars").Value, out int _) &&
+                        x.Element("text") != null &&
+                        x.Element("text").Element(selectedLanguage) != null &&
+                        !string.IsNullOrWhiteSpace(x.Element("text").Element(selectedLanguage).Value) &&
+                        x.Element("ID") != null &&
+                        int.TryParse(x.Element("ID").Value, out int _)
+                    )
                     .ToList();
-                if (posts.Count == 0)
+
+                if (allPosts.Count == 0)
                 {
+                    foreach (var tb in new[] { textBoxReview1, textBoxReview2, textBoxReview3, textBoxReview4, textBoxReview5, textBoxReview6 })
+                        tb.Text = "No comments available for this language.";
+                    AverageRatingLabel.Text = "Last 5 days rating: N/A";
+                    selectedReviewIds.Clear();
                     return;
                 }
 
-                var goodPosts = posts.Where(x => int.Parse(x.Element("Stars").Value) >= 3).ToList();
-                var badPosts = posts.Where(x => int.Parse(x.Element("Stars").Value) <= 2).ToList();
-
-                var rand = new Random();
-                var selectedComments = new List<string>();
-                var selectedStars = new List<int>();
-
-                for (int i = 0; i < count; i++)
+                // If we need to select new comments (e.g., after simulation or button click)
+                if (forceNewSelection || selectedReviewIds.Count == 0)
                 {
-                    bool pickGood = rand.NextDouble() < clubMood;
-                    List<XElement> sourceList = pickGood ? goodPosts : badPosts;
-
-                    if (sourceList.Count == 0)
-                        sourceList = pickGood ? badPosts : goodPosts; // fallback if one list is empty
-
-                    if (sourceList.Count == 0)
+                    selectedReviewIds.Clear();
+                    var rand = new Random();
+                    var availableIds = allPosts.Select(x => int.Parse(x.Element("ID").Value)).ToList();
+                    for (int i = 0; i < count && availableIds.Count > 0; i++)
                     {
-                        selectedComments.Add("No comments available.");
-                        selectedStars.Add(0);
+                        int idx = rand.Next(availableIds.Count);
+                        selectedReviewIds.Add(availableIds[idx]);
+                        availableIds.RemoveAt(idx);
                     }
-                    else
-                    {
-                        var comment = sourceList[rand.Next(sourceList.Count)];
-                        selectedComments.Add(comment.Element("Text")?.Value ?? "");
-                        int stars = 0;
-                        int.TryParse(comment.Element("Stars")?.Value, out stars);
-                        selectedStars.Add(stars);
-                        sourceList.Remove(comment);
-                    }
+                }
+
+                // Now, for the current language, fetch the reviews by ID
+                var selectedPosts = allPosts
+                    .Where(x => selectedReviewIds.Contains(int.Parse(x.Element("ID").Value)))
+                    .ToList();
+
+                // Sort by the order in selectedReviewIds
+                selectedPosts = selectedReviewIds
+                    .Select(id => selectedPosts.FirstOrDefault(x => int.Parse(x.Element("ID").Value) == id))
+                    .Where(x => x != null)
+                    .ToList();
+
+                var selectedComments = selectedPosts
+                    .Select(x => x.Element("text").Element(selectedLanguage)?.Value ?? "No comments available.")
+                    .ToList();
+
+                var selectedStars = selectedPosts
+                    .Select(x => int.TryParse(x.Element("Stars")?.Value, out int stars) ? stars : 0)
+                    .ToList();
+
+                // Fill up to count with empty if not enough
+                while (selectedComments.Count < count)
+                {
+                    selectedComments.Add("No comments available.");
+                    selectedStars.Add(0);
                 }
 
                 TextBox[] textBoxes = { textBoxReview1, textBoxReview2, textBoxReview3, textBoxReview4, textBoxReview5, textBoxReview6 };
                 PictureBox[] starPictures = { pictureBoxUser1, pictureBoxUser2, pictureBoxUser3, pictureBoxUser4, pictureBoxUser5, pictureBoxUser6 };
-                GroupBox[] groupBoxes = {groupBoxUser1, groupBoxUser2, groupBoxUser3, groupBoxUser4, groupBoxUser5, groupBoxUser6};
+                GroupBox[] groupBoxes = { groupBoxUser1, groupBoxUser2, groupBoxUser3, groupBoxUser4, groupBoxUser5, groupBoxUser6 };
 
-                // Dictionary mapping int 1-6 to arrays of 5 PictureBox controls
                 Dictionary<int, PictureBox[]> reviewStarPictureBoxes = new Dictionary<int, PictureBox[]>
                 {
-                { 1, new PictureBox[] { pictureBoxStar11, pictureBoxStar12, pictureBoxStar13, pictureBoxStar14, pictureBoxStar15 } },
-                { 2, new PictureBox[] { pictureBoxStar21, pictureBoxStar22, pictureBoxStar23, pictureBoxStar24, pictureBoxStar25 } },
-                { 3, new PictureBox[] { pictureBoxStar31, pictureBoxStar32, pictureBoxStar33, pictureBoxStar34, pictureBoxStar35 } },
-                { 4, new PictureBox[] { pictureBoxStar41, pictureBoxStar42, pictureBoxStar43, pictureBoxStar44, pictureBoxStar45 } },
-                { 5, new PictureBox[] { pictureBoxStar51, pictureBoxStar52, pictureBoxStar53, pictureBoxStar54, pictureBoxStar55 } },
-                { 6, new PictureBox[] { pictureBoxStar61, pictureBoxStar62, pictureBoxStar63, pictureBoxStar64, pictureBoxStar65 } }
+                    { 1, new PictureBox[] { pictureBoxStar11, pictureBoxStar12, pictureBoxStar13, pictureBoxStar14, pictureBoxStar15 } },
+                    { 2, new PictureBox[] { pictureBoxStar21, pictureBoxStar22, pictureBoxStar23, pictureBoxStar24, pictureBoxStar25 } },
+                    { 3, new PictureBox[] { pictureBoxStar31, pictureBoxStar32, pictureBoxStar33, pictureBoxStar34, pictureBoxStar35 } },
+                    { 4, new PictureBox[] { pictureBoxStar41, pictureBoxStar42, pictureBoxStar43, pictureBoxStar44, pictureBoxStar45 } },
+                    { 5, new PictureBox[] { pictureBoxStar51, pictureBoxStar52, pictureBoxStar53, pictureBoxStar54, pictureBoxStar55 } },
+                    { 6, new PictureBox[] { pictureBoxStar61, pictureBoxStar62, pictureBoxStar63, pictureBoxStar64, pictureBoxStar65 } }
                 };
 
                 for (int i = 1; i <= selectedComments.Count; i++)
@@ -853,7 +929,7 @@ namespace StripSim_Door_Alternative1
                     var textBox = textBoxes[i - 1];
                     if (textBox != null)
                     {
-                        groupBoxes[i - 1].Text = usernames[rand.Next(usernames.Count())].Item1;
+                        groupBoxes[i - 1].Text = usernames.Length > 0 ? usernames[new Random().Next(usernames.Length)].Item1 : "";
                         textBox.Text = selectedComments[i - 1];
                         textBox.Visible = true;
                         starPictures[i - 1].Visible = true;
@@ -875,7 +951,6 @@ namespace StripSim_Door_Alternative1
                     }
                 }
 
-                // FIFO: Add new ratings, remove oldest if over 20
                 foreach (var stars in selectedStars)
                 {
                     lastFiveDaysRatings.Enqueue(stars);
@@ -883,7 +958,6 @@ namespace StripSim_Door_Alternative1
                         lastFiveDaysRatings.Dequeue();
                 }
 
-                // Calculate and display average of all ratings
                 if (lastFiveDaysRatings.Count > 0)
                 {
                     double avg = lastFiveDaysRatings.Average();
@@ -1054,7 +1128,7 @@ namespace StripSim_Door_Alternative1
 
             // Improved price multiplier logic for more realistic drop-off
             double priceMultiplier;
-                if (priceRatio > 1.2)
+            if (priceRatio > 1.2)
                 priceMultiplier = 1.4;
             else if (priceRatio < 0.8)
             {
@@ -1105,14 +1179,16 @@ namespace StripSim_Door_Alternative1
 
         private void endDay()
         {
+            velvetClubRuntimes.totalBalance += (int)(velvetClubRuntimes.EntranceRevenue + velvetClubRuntimes.CloakRoomRevenue +
+                velvetClubRuntimes.ShowRevenue + velvetClubRuntimes.BarRevenue + velvetClubRuntimes.LapBoothRevenue +
+                velvetClubRuntimes.VipRoomRevenue);
             // Reset internal stats
-            doorRevenue = 0;
             acceptedClients.Clear();
             rejectedClients.Clear();
-            
+
             clientsList.Clear();
             clients = 0;
-            velvetClubRuntimes = new VelvetClubRuntime();
+            velvetClubRuntimes.newDay();
 
             // Reset labels (adjust label names as needed)
             label21.Text = "0"; // Door revenue
@@ -1130,6 +1206,413 @@ namespace StripSim_Door_Alternative1
             label36.Text = "0"; // Number of customers
 
             // Reset any other relevant UI elements or variables here
+            selectedReviewIds.Clear();
+        }
+
+        private void comboBox2_SelectedIndexChanged(object sender, EventArgs e)
+        {
+
+        }
+
+        private void languageSelection_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (dayCounter == 1) return;
+            ShowRandomCommentsOnSocialMediaTab(); // Only update language, don't clear or re-pick comments
+        }
+
+        private void label25_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void label24_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void label23_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void buttonShowEventDescription_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void trackBarDoorBouncer_Scroll(object sender, EventArgs e)
+        {
+            FindClosestBouncerScoreToTrackBar();
+            int cost = 0;
+            foreach (var item in listBoxAddedDoorBouncers.Items)
+            {
+                string bouncerName = item.ToString();
+                foreach (Bouncer bouncer in bouncerList)
+                {
+                    if (bouncer.Name == bouncerName)
+                    {
+                        cost += bouncer.DailyWage;
+                    }
+                }
+            }
+            labelDoorBouncersCost.Text = "Door Cost: " + cost.ToString();
+            labelBouncerCount.Text = "Bouncer Count: " + listBoxAddedDoorBouncers.Items.Count.ToString();
+        }
+
+        // Pseudocode plan:
+        // 1. For all possible combinations of bouncers (from 1 up to all), calculate GetBouncerScore(1, count, maxConflict, minConflict).
+        // 2. For each combination, compare the score to trackBar1.Value, keep the closest (min absolute difference).
+        // 3. At the end, add the names of the bouncers in the closest combination to listBox1.
+        void FindClosestBouncerScoreToTrackBar()
+        {
+            int targetScore = trackBarDoorBouncers.Value;
+            int n = bouncerList.Count;
+            int closestScore = int.MinValue;
+            int closestDiff = int.MaxValue;
+            List<Bouncer> bestCombo = null;
+            bool perfectMatch = false;
+            List<int> ns = new List<int>(n);
+            for (int i = 0; i < n; i++)
+            {
+                ns.Add(i);
+            }
+            for (int k = 1; k <= Math.Min(n, velvetClub.DoorBouncerCapacity); k++)
+            {
+                foreach (var indices in GetCombinations(ns, k))
+                {
+                    var combo = new List<Bouncer>();
+                    int maxConflict = int.MinValue;
+                    int maxScreening = int.MinValue;
+                    foreach (int i in indices)
+                    {
+                        var b = bouncerList[i];
+                        combo.Add(b);
+                        if (b.ConflictControl > maxConflict) maxConflict = b.ConflictControl;
+                        if (b.ClientScreening > maxScreening) maxScreening = b.ClientScreening;
+                    }
+                    int level = velvetClubRuntimes.level;
+                    int score = GetBouncerScore(level, k, maxConflict, maxScreening);
+                    int diff = Math.Abs(score - targetScore);
+                    if (diff < closestDiff)
+                    {
+                        closestDiff = diff;
+                        closestScore = score;
+                        bestCombo = new List<Bouncer>(combo);
+                    }
+                    if (diff == 0)
+                    {
+                        closestScore = score;
+                        perfectMatch = true;
+                        break;
+                    }
+                }
+                if (perfectMatch) break;
+            }
+            listBoxAddedDoorBouncers.Items.Clear();
+            labelDoorReadiness.Text = $"Closest Score: {closestScore} (Target: {targetScore})";
+            if (bestCombo != null)
+            {
+                foreach (var b in bestCombo)
+                    listBoxAddedDoorBouncers.Items.Add(b.Name);
+            }
+            setDoorReadiness(closestScore);
+            numericUpDown2.Value = listBoxAddedDoorBouncers.Items.Count;
+        }
+
+        // Helper: generate all k-combinations of n elements (returns list of index arrays)
+        public static List<List<int>> GetCombinations(List<int> input, int k)
+        {
+            List<List<int>> result = new List<List<int>>();
+            GenerateCombinations(input, k, 0, new List<int>(), result);
+            return result;
+        }
+
+        // Recursive helper
+        private static void GenerateCombinations(List<int> input, int k, int start, List<int> current, List<List<int>> result)
+        {
+            if (current.Count == k)
+            {
+                result.Add(new List<int>(current));
+                return;
+            }
+
+            for (int i = start; i < input.Count; i++)
+            {
+                current.Add(input[i]);
+                GenerateCombinations(input, k, i + 1, current, result);
+                current.RemoveAt(current.Count - 1); // backtrack
+            }
+        }
+
+        public int GetBouncerScore(int clubLevel, int numberOfBouncers, int maxConflict, int maxScreening)
+        {
+            // Clamp inputs
+            clubLevel = Clamp(clubLevel, 0, 5);
+            numberOfBouncers = Clamp(numberOfBouncers, 0, 5);
+
+            const int maxScore = 40;
+
+            // Dynamically set how many bouncers are required to get full score
+            // Level 1 requires ~1.5, Level 10 requires 5.0 bouncers
+            double requiredBouncers = 1 + (clubLevel) * (3.5 / 5); // maps 1→1.5, 10→5.0
+
+            double equipmentWeight = 0; //GetEquipmentScore(door.OwnedEquipments); //Max 20 because 20% of the score
+
+            // Calculate the score proportionally
+            double proportion = Math.Min(numberOfBouncers / requiredBouncers, 1.0);
+
+            return (int)Math.Round(maxScore * proportion) + (int)equipmentWeight + (int)(maxConflict * 0.24) + (int)(maxScreening * 0.16);
+        }
+
+        public static int Clamp(int value, int min, int max)
+        {
+            if (value < min) return min;
+            if (value > max) return max;
+            return value;
+        }
+
+        public int GetEquipmentScore()//(List<Equipment> ownedEquipments)
+        {
+            return 0;
+        }
+
+        private void contractedBouncers_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (contractedBouncers.SelectedItem == null)
+                return;
+
+            string selectedName = contractedBouncers.SelectedItem.ToString();
+
+            groupBoxBouncerDescription.Text = $"Bouncer: {selectedName}";
+            string xmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DoorBouncers.xml");
+            if (!File.Exists(xmlPath))
+                return;
+
+            var doc = XDocument.Load(xmlPath);
+            var bouncer = doc.Descendants("bouncer")
+                .FirstOrDefault(x => (string)x.Attribute("name") == selectedName);
+
+            if (bouncer == null)
+                return;
+
+            // Get ID and overall
+            string idStr = (string)bouncer.Attribute("id");
+            string overallStr = (string)bouncer.Element("overall");
+            string conflictStr = (string)bouncer.Element("conflict_control");
+            string screeningStr = (string)bouncer.Element("client_screening");
+            string wageStr = (string)bouncer.Element("daily_wage");
+
+            int minWage = int.MaxValue, maxWage = int.MinValue;
+            string xmlPathWage = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DoorBouncers.xml");
+            if (File.Exists(xmlPathWage))
+            {
+                var docWage = XDocument.Load(xmlPathWage);
+                foreach (var item in contractedBouncers.Items)
+                {
+                    string bouncerName = item.ToString();
+                    var bouncerNode = docWage.Descendants("bouncer")
+                        .FirstOrDefault(x => (string)x.Attribute("name") == bouncerName);
+                    if (bouncerNode != null)
+                    {
+                        int w = 0;
+                        int.TryParse((string)bouncerNode.Element("daily_wage"), out w);
+                        if (w < minWage) minWage = w;
+                        if (w > maxWage) maxWage = w;
+                    }
+                }
+                minWage -= 10;
+                maxWage += 10;
+            }
+            int normalized = 0;
+            if (maxWage > minWage)
+                normalized = ((int)bouncer.Element("daily_wage") - minWage) * 100 / (maxWage - minWage);
+
+            progressBarDailyWage.Value = normalized;
+            if (normalized < 40)
+            {
+                progressBarDailyWage.ForeColor = Color.Green;
+            }
+            else if (normalized < 60)
+            {
+                progressBarDailyWage.ForeColor = Color.Orange;
+            }
+            else
+            {
+                progressBarDailyWage.ForeColor = Color.Red;
+            }
+
+            // Update PictureBox
+            if (int.TryParse(idStr, out int id))
+            {
+                string imgPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images", "DoorBouncers", $"{id}.jpeg");
+                if (File.Exists(imgPath))
+                {
+                    if (bouncerPictureBox.Image != null)
+                    {
+                        var oldImg = bouncerPictureBox.Image;
+                        bouncerPictureBox.Image = null;
+                        oldImg.Dispose();
+                    }
+                    bouncerPictureBox.Image = Image.FromFile(imgPath);
+                }
+                else
+                {
+                    bouncerPictureBox.Image = null;
+                }
+            }
+
+            // Update ProgressBars
+            if (float.TryParse(overallStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float overall))
+            {
+                int value = (int)Math.Round(overall);
+                value = Math.Max(overallDoorBouncer.Minimum, Math.Min(overallDoorBouncer.Maximum, value));
+                overallDoorBouncer.Value = value;
+            }
+            if (float.TryParse(conflictStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float conflictControl))
+            {
+                int value = (int)Math.Round(conflictControl);
+                progressBarClientScreeningBouncer.Value = value;
+            }
+            if (float.TryParse(screeningStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float clientScreening))
+            {
+                int value = (int)Math.Round(clientScreening);
+                progressBarConflictControl.Value = value;
+            }
+
+            // Print daily wage cost in GroupBox4 (e.g. in the group box title or a label)
+            groupBoxBouncerDescription.Text = $"Bouncer: {selectedName} | Daily Wage: {wageStr}";
+
+            if (DailyWageBouncerText != null)
+                DailyWageBouncerText.Text = $"Daily Wage: {wageStr}";
+        }
+
+        private void buttonShowEventDescription_Click_1(object sender, EventArgs e)
+        {
+            MessageBox.Show("You forgot the XML");
+        }
+
+        private void PopulateStripperListBox()
+        {
+            StripperSelectionBox.Items.Clear();
+            foreach (var stripper in stripperList)
+            {
+                // Display name and optionally other info
+                StripperSelectionBox.Items.Add($"{stripper.Name} | Wage: {stripper.DailyWage} | Perf: {stripper.PerformanceSkill} | Attr: {stripper.Attractiveness} | Charisma: {stripper.Charisma} | Overall: {stripper.OverallScore}");
+            }
+        }
+
+        private void StripperListBox_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (StripperSelectionBox.SelectedIndex < 0 || stripperList == null || stripperList.Count == 0)
+            {
+                StripperImage.Image = null;
+                ShowStripperBox.Text = "Stripper Name";
+                labelDailyWageStripper.Text = "Daily Wage";
+                return;
+            }
+
+            // Get the selected stripper
+            var selectedStripper = stripperList[StripperSelectionBox.SelectedIndex];
+
+            // Build the expected image path (e.g., "bin/debug/images/strippers/Lola Velvet.jpg")
+            string imagesDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images", "Strippers");
+
+            string imagePath = Path.Combine(imagesDir, ((StripperSelectionBox.SelectedIndex) + 1).ToString() + ".jpeg");
+
+            if (imagePath != null)
+            {
+                // Dispose previous image to avoid memory leaks
+                if (StripperImage.Image != null)
+                {
+                    var oldImg = StripperImage.Image;
+                    StripperImage.Image = null;
+                    oldImg.Dispose();
+                }
+                StripperImage.Image = Image.FromFile(imagePath);
+            }
+            else
+            {
+                StripperImage.Image = null; // Or set a default image
+            }
+            progressBarOverallStripper.Value = selectedStripper.OverallScore;
+            progressBarAttractiveness.Value = selectedStripper.Attractiveness;
+            progressBarPerformanceSkill.Value = selectedStripper.PerformanceSkill;
+            progressBarCharisma.Value = selectedStripper.Charisma;
+            int minWage = int.MaxValue;
+            int maxWage = int.MinValue;
+
+            foreach (var item in stripperList)
+            {
+                int w = item.DailyWage;
+                if (w < minWage) minWage = w;
+                if (w > maxWage) maxWage = w;
+            }
+            minWage -= 25;
+            maxWage += 25;
+            int normalized = 0;
+            if (maxWage > minWage)
+                normalized = ((int)selectedStripper.DailyWage - minWage) * 100 / (maxWage - minWage);
+
+            if (normalized < 40)
+            {
+                progressBarDailyWageStripper.ForeColor = Color.Green;
+            }
+            else if (normalized < 60)
+            {
+                progressBarDailyWageStripper.ForeColor = Color.Orange;
+            }
+            else
+            {
+                progressBarDailyWageStripper.ForeColor = Color.Red;
+            }
+            progressBarDailyWageStripper.Value = normalized;
+            ShowStripperBox.Text = "Stripper Name: " + selectedStripper.Name;
+            labelDailyWageStripper.Text = "Daily Wage: " + selectedStripper.DailyWage.ToString();
+        }
+
+        private void addStripperButton_Click(object sender, EventArgs e)
+        {
+            if (StripperSelectionBox.SelectedIndex < 0 || stripperList == null || stripperList.Count == 0)
+                return;
+
+            var selectedStripper = stripperList[StripperSelectionBox.SelectedIndex];
+
+            if (!strippersOnDuty.Items.Contains(selectedStripper.Name))
+            {
+                strippersOnDuty.Items.Add(selectedStripper.Name);
+                labelStripperCount.Text = $"Strippers on Duty: {strippersOnDuty.Items.Count}";
+                int cost = 0;
+                foreach (var item in strippersOnDuty.Items)
+                {
+                    cost += stripperList.FirstOrDefault(x => x.Name == item.ToString())?.DailyWage ?? 0;
+                }
+                labelStripperCost.Text = $"Total Stripper Cost: {cost} $";
+                progressBarStripperReadiness.Value = 50;
+            }
+        }
+
+        private void removeStripperButton_Click(object sender, EventArgs e)
+        {
+            if (strippersOnDuty.SelectedIndex < 0 || stripperList == null || stripperList.Count == 0)
+                return;
+
+            string selectedName = strippersOnDuty.SelectedItem.ToString();
+            var selectedStripper = stripperList.FirstOrDefault(x => x.Name == selectedName);
+            if (selectedStripper == null)
+                return;
+
+            if (strippersOnDuty.Items.Contains(selectedStripper.Name))
+            {
+                strippersOnDuty.Items.Remove(selectedStripper.Name);
+                labelStripperCount.Text = $"Strippers on Duty: {strippersOnDuty.Items.Count}";
+                int cost = 0;
+                foreach (var item in strippersOnDuty.Items)
+                {
+                    cost += stripperList.FirstOrDefault(x => x.Name == item.ToString())?.DailyWage ?? 0;
+                }
+                labelStripperCost.Text = $"Total Stripper Cost: {cost} $";
+            }
+            progressBarStripperReadiness.Value = 50;
         }
     }
 }
