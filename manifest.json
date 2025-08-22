@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Phia Hover Test",
+  "version": "0.0.2",
+  "description": "Highlights products, scrapes on Ctrl+Shift+Click, and runs local search.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["https://duckduckgo.com/*", "<all_urls>"],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle", 
+      "all_frames": true
+    }
+  ],
+
+  "action": {
+    "default_title": "Phia"
+  }
+}
